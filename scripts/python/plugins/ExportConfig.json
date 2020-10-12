@@ -13,6 +13,9 @@
     "convert_format"    : "tx",
     "output_size"       : 4096,
     "normal_map"        : "open_gl",
+    "dithering"         : 1,
+    "dilationDistance"  : 16,
+    "paddingAlgorithm"  : "infinite",
     "export_shader_params" : 0,
     "maps" : {
         "basecolor"     : "C1",
