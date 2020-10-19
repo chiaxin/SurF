@@ -1,5 +1,6 @@
 {
     "configName"        : "ABC",
+    "python"            : "python",
     "converter"         : "D:/Developments/Libraries/oiio/bin/maketx.exe",
     "naming"            : "^([A-Z]{3,}_\\w+)(?:_Sp[A-Z])_v\\d{1,3}(?:_[A-Z]{1,3})?.spp$",
     "export_name"       : "$textureSet/{0}_{1}_HI(_$udim)",
@@ -35,7 +36,10 @@
         "specularlevel" : "RA1",
         "blendingmask"  : "M1",
         "scattering"    : "SHC1",
-        "bump"          : "B1"
+        "bump"          : "B1",
+        "mask01"        : "M1",
+        "mask02"        : "M2",
+        "mask03"        : "M3"
     },
     "meshmaps" : {
         "settings" : {
