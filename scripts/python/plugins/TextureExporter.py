@@ -1,12 +1,12 @@
 #
 # TextureExporter
 #
-# Author : Chia Xin Lin (nnnight@gmail.com)
+# Author : Chia Xin Lin ( nnnight@gmail.com )
 #
-# Version : 0.1.01 (beta)
+# Version : 0.1.03 (beta)
 #
 # First Build : 2020/09/18
-# Last Updated: 2020/10/19
+# Last Updated: 2020/10/26
 #
 # Substance Painter Version : 2020.2.0 (6.2.0)
 #
@@ -98,7 +98,20 @@ _MeshMaps = [
     "thickness"
 ]
 
-ExportChannelRangeKeeper = CxLd.meta.Metadata("Export_Channel_Ranges")
+_MakeTxOptions = " ".join([
+    "-oiio",
+    "-u",
+    "--checknan",
+    "--constant-color-detect",
+    "--monochrome-detect",
+    "--opaque-detect"
+])
+
+ExportChannelRangeKeeper = CxLd.meta.Metadata("te_Channel_Ranges")
+ForceEightBitKeeper      = CxLd.meta.Metadata("te_Force_Eight_Bit")
+ConvertAfterKeeper       = CxLd.meta.Metadata("te_Convert_After")
+ColorCorrectKeeper       = CxLd.meta.Metadata("te_Color_Correct")
+CombinedMeshMapKeeper    = CxLd.meta.Metadata("te_Combined_Meshmap")
 
 # Debug functions :
 def _log_channel_map(channel_map):
@@ -212,7 +225,7 @@ try:
 except ExportSettingNoFoundError as error:
     print(error)
 
-_MultiProcessConverScript = """
+_MultiProcessConvertScript = """
 import subprocess
 import multiprocessing
 maketx = r"{0}"
@@ -232,15 +245,29 @@ if __name__ == "__main__":
         worker.start()
 """.format(Converter)
 
-"""
-def convert(source, destination):
-    print("Convert .. %s" % destination)
-    process = subprocess.Popen('"%s" -oiio -o "%s" "%s"' % (
-        Converter, destination, source
-        )
-    )
+_SRgbConvertOption = '--colorconvert sRGB "scene-linear Rec 709/sRGB"'
+
+_MultiProcessConvertPoolScript = """
+import subprocess
+import multiprocessing
+from os.path import basename
+maketx = r"{0}"
+def work(pairs):
+    raw_process = '"%s" {1} -o "%s" "%s"'
+    srgb_process= '"%s" {1} {2} -o "%s" "%s"'
+    arguments = raw_process
+    for channel in convert_channels:
+        if pairs[0].find(channel) > 0:
+            arguments = srgb_process
+            break
+    process = subprocess.Popen(arguments % (maketx, pairs[1], pairs[0]))
     process.communicate()
-"""
+
+if __name__ == "__main__":
+    cpu_count = multiprocessing.cpu_count()
+    pool = multiprocessing.Pool(cpu_count)
+    pool.map(work, targets)
+""".format(Converter, _MakeTxOptions, _SRgbConvertOption)
 
 class Workflow(object):
     Successful = 0
@@ -290,8 +317,7 @@ class Workflow(object):
     def get_previous_directory(self):
         if self.project:
             return dirname(dirname(self.project)).replace('\\', '/')
-        else:
-            return None
+        return None
 
     def get_output_directory(self):
         previous = self.get_previous_directory()
@@ -312,8 +338,10 @@ class Workflow(object):
         return None
 
 class Exporter(Workflow):
-    def __init__(self, shader, shader_name="",
-        parse="", with_convert=False, force_8_bits=False
+    SRgbConvertChannels = []
+    def __init__(self, shader, shader_name="", parse="",
+        with_convert=False, force_8_bits=False, is_combined=False,
+        is_color_correct=False
     ):
         super().__init__()
         self.shader = shader
@@ -321,6 +349,8 @@ class Exporter(Workflow):
         self.scope_map = {}
         self.with_convert = with_convert
         self.force_8_bits = force_8_bits
+        self.is_color_correct = is_color_correct
+        self.is_combined = is_combined
         self.texture_set = TextureSetWrapper(
             spts.TextureSet.from_name(self.shader)
         )
@@ -328,6 +358,7 @@ class Exporter(Workflow):
         if parse:
             self.scope_map = self.get_channel_udim_range(parse)
         self.output_path = self.get_output_directory()
+        self.create_directory(self.output_path)
         self.convert_path = self.get_convert_directory()
         self.meshmap_path = self.get_meshmap_directory()
         self.create_directory(self.output_path)
@@ -345,8 +376,6 @@ class Exporter(Workflow):
         export_name = ExportName
         if is_udim(self.shader):
             export_name = LegacyName
-            if export_name.find("$shader") >= 0:
-                export_name = export_name.replace("$shader", self.shader_name)
         return export_name.format(title, channel_name)
 
     def get_channel_maps(self):
@@ -366,6 +395,7 @@ class Exporter(Workflow):
             "ChannelFormat.L32F",
             "ChannelFormat.RGB32F"
         )
+        unique_names = set()
         texture_set = self.texture_set
         for label, channel in self.channel_maps.items():
             if label.find("#") > 0:
@@ -376,6 +406,10 @@ class Exporter(Workflow):
                 continue
             channel_name = ChannelMaps.get(label.lower(), None)
             if not channel_name:
+                warn("Can't found channel label : %s" % label)
+                continue
+            elif channel_name in unique_names:
+                warn("Duplicated channel name : %s" % channel_name)
                 continue
             src_map_name = label.lower()
             if src_map_name == "normal":
@@ -394,19 +428,21 @@ class Exporter(Workflow):
                 indivduals = ('L')
             ch_describe = dict()
             ch_describe['fileName'] = self.get_export_name(channel_name)
+            unique_names.add(channel_name)
             channels = []
             parameters = {}
+            fmt_value = str(channel.format())
             if self.force_8_bits:
                 parameters["bitDepth"] = "8"
             else:
-                channel_format = channel.format()
-                fmt_value = str(channel_format)
                 if fmt_value in bit_depth_8_list:
                     parameters["bitDepth"] = "8"
                 elif fmt_value in bit_depth_16_list:
                     parameters["bitDepth"] = "16"
                 elif fmt_value in bit_depth_32_list:
                     parameters["bitDepth"] = "32"
+            if fmt_value == "ChannelFormat.sRGB8":
+                Exporter.SRgbConvertChannels.append(channel_name)
             for single in indivduals:
                 channel_description = {
                         "destChannel": single,
@@ -420,23 +456,14 @@ class Exporter(Workflow):
             maps.append(ch_describe)
         return maps
 
-    def get_export_list(self):
+    def get_export_list(self, is_meshmap=False):
+        if is_meshmap:
+            return [{ "rootPath" : self.shader }]
         export_list = []
         output_maps = []
         uv_tiles = []
         root_path = self.shader
         if self.scope_map:
-            """
-            if "*" in self.scope_map:
-                uv_tiles = self.scope_map["*"]
-                export_list.append({
-                    "rootPath" : root_path,
-                    "filter" : {
-                        "uvTiles" : uv_tiles
-                    }
-                })
-            else:
-            """
             wildcard_range = self.scope_map.pop("*", [])
             for channel in list(self.scope_map):
                 if channel not in ChannelMaps:
@@ -455,7 +482,6 @@ class Exporter(Workflow):
                     export_list[-1]["filter"]["uvTiles"] = wildcard_range[:]
         else:
             export_list = [{ "rootPath" : root_path }]
-        # if __DEBUG__: print(export_list)
         return export_list
 
     def get_size(self):
@@ -535,46 +561,83 @@ class Exporter(Workflow):
             for channel in self.channel_maps:
                 if channel not in range_maps:
                     range_maps[channel] = all_range_buffers
-        if __DEBUG__: print(range_maps)
         return range_maps
 
-    def get_meshmaps(self, is_combined=False):
-        title = self.get_title()
+    def get_meshmaps(self):
         maps = []
+        title = self.get_title()
         texture_set = TextureSetWrapper(spts.TextureSet.from_name(self.shader))
-        for meshmap in _MeshMaps:
+        if self.is_combined:
             ch_describe = dict()
-            ch_describe["fileName"] = MeshMapName.format(title, meshmap)
+            ch_describe["fileName"] = MeshMapName.format(title, "CombinedMap")
             channels = []
-            for single in ["R", "G", "B"]:
-                channel_description = {
-                    "destChannel": single,
-                    "srcChannel" : single,
-                    "srcMapType" : "meshMap",
-                    "srcMapName" : meshmap
-                }
-                channels.append(channel_description)
+            channels.append({
+                "destChannel" : "R",
+                "srcChannel"  : "L",
+                "srcMapType"  : "meshMap",
+                "srcMapName"  : "ambient_occlusion"
+            })
+            channels.append({
+                "destChannel" : "G",
+                "srcChannel"  : "L",
+                "srcMapType"  : "meshMap",
+                "srcMapName"  : "curvature"
+            })
+            channels.append({
+                "destChannel" : "B",
+                "srcChannel"  : "L",
+                "srcMapType"  : "meshMap",
+                "srcMapName"  : "thickness"
+            })
             ch_describe['channels'] = channels
+            ch_describe['parameters'] = {
+                "fileFormat" : ExportFormat,
+                "bitDepth"   : "8"
+            }
             maps.append(ch_describe)
+        else:
+            for meshmap in _MeshMaps:
+                ch_describe = dict()
+                ch_describe["fileName"] = MeshMapName.format(title, meshmap)
+                channels = []
+                for single in ["R", "G", "B"]:
+                    channel_description = {
+                        "destChannel": single,
+                        "srcChannel" : single,
+                        "srcMapType" : "meshMap",
+                        "srcMapName" : meshmap
+                    }
+                    channels.append(channel_description)
+                ch_describe['channels'] = channels
+                ch_describe['parameters'] = {
+                    "fileFormat" : ExportFormat,
+                    "bitDepth"   : "8"
+                }
+                maps.append(ch_describe)
         return maps
 
     def get_export_texture_presets(self):
         return { "name" : ExportPreset, "maps" : self.get_channel_maps() }
 
     def get_export_meshmap_presets(self):
-        return { "name" : ExportPreset, "maps" : self.get_meshmaps() }
+        return { "name" : ExportPreset, "maps" : self.get_meshmaps()}
 
     def get_export_path(self):
         return self.output_path
 
-    def get_parameters(self, is_convert=False, is_meshmap=False):
+    def get_parameters(self,
+            is_convert=False,
+            is_meshmap=False
+        ):
         export_format = ExportFormat
         export_path = self.get_export_path()
         if is_convert:
             export_format = ConvertFormat
             export_path = self.convert_path
+            self.create_directory(export_path)
         if is_meshmap:
             export_path = self.meshmap_path
+            self.create_directory(export_path)
             presets = self.get_export_meshmap_presets()
         else:
             presets = self.get_export_texture_presets()
@@ -583,12 +646,12 @@ class Exporter(Workflow):
             "exportShaderParams"    : ExportShaderParams,
             "defaultExportPreset"   : ExportPreset,
             "exportPresets"         : [ presets ],
-            "exportList"            : self.get_export_list(),
+            "exportList"            : self.get_export_list(is_meshmap),
             "exportParameters" : [
                 {
                     "parameters" : {
                         "fileFormat" : export_format,
-                        "dithering"  : True,
+                        "dithering"  : Dithering,
                         "sizeLog2"   : self.get_size(),
                         "paddingAlgorithm" : PaddingAlgorithm,
                         "dilationDistance" : DilationDistance
@@ -597,11 +660,12 @@ class Exporter(Workflow):
             ]
         }
 
-    def output_meshmap(self):
-        output_parameters = self.get_parameters(False, True)
+    def output_meshmap(self, is_combined=False):
+        output_parameters = self.get_parameters(False, True, is_combined)
         spex.export_project_textures(output_parameters)
 
     def output_textures(self):
+        Exporter.SRgbConvertChannels.clear()
         if not self.valid:
             err("Project name is incorrect!")
             return None
@@ -700,15 +764,24 @@ class Exporter(Workflow):
         line_counter = 0
         try:
             with open(script, "w") as fh:
-                fh.write("targets = (\n")
+                #if self.is_color_correct:
+                if True:
+                    buffer = ""
+                    for channel in Exporter.SRgbConvertChannels:
+                        buffer = '"' + channel + '", '
+                    fh.write("convert_channels = [{0}]\n".format(buffer))
+                else:
+                    fh.write("convert_channels = []\n")
+                fh.write("targets = [\n")
                 for src, dest in convert_pairs:
                     self.create_directory(dirname(dest))
                     if line_counter == length:
-                        fh.write('\t("%s", "%s")\n)\n' % (src, dest))
+                        fh.write('\t("%s", "%s")\n]\n' % (src, dest))
                     else:
                         fh.write('\t("%s", "%s"),\n' % (src, dest))
                     line_counter = line_counter + 1
-                fh.write(_MultiProcessConverScript)
+                # fh.write(_MultiProcessConvertScript)
+                fh.write(_MultiProcessConvertPoolScript)
         except Exception as e:
             print(e)
             warn("Failed to write script : {0}".format(script))
@@ -802,10 +875,36 @@ class TextureExporterDialog(QtWidgets.QDialog):
     def change_shader_name(self, name):
         self.shader_name = name
 
+    def store_metadata(self):
+        ExportChannelRangeKeeper.set("store", self.udim_range_le.text())
+        ForceEightBitKeeper.set("boolean", self.force_8bits_cb.isChecked())
+        ConvertAfterKeeper.set("boolean", self.convert_cb.isChecked())
+        ColorCorrectKeeper.set("boolean", self.color_correct_cb.isChecked())
+
+    def reset_metadata(self):
+        self.udim_range_le.setText(ExportChannelRangeKeeper.get("store"))
+        if ForceEightBitKeeper.get("boolean"):
+            self.force_8bits_cb.setChecked(True)
+        else:
+            self.force_8bits_cb.setChecked(False)
+        if ConvertAfterKeeper.get("boolean"):
+            self.convert_cb.setChecked(True)
+        else:
+            self.convert_cb.setChecked(False)
+        if ColorCorrectKeeper.get("boolean"):
+            self.color_correct_cb.setChecked(True)
+        else:
+            self.color_correct_cb.setChecked(False)
+        if CombinedMeshMapKeeper.get("boolean"):
+            self.combined_meshmap_cb.setChecked(True)
+        else:
+            self.combined_meshmap_cb.setChecked(False)
+
     def export_texture(self):
         scope_expression = ""
         is_convert = self.convert_cb.isChecked()
         is_force_8bits = self.force_8bits_cb.isChecked()
+        is_color_correct = self.color_correct_cb.isChecked()
         all_texture_sets = [ts.name() for ts in spts.all_texture_sets()]
         for index, texture_set in enumerate(self.texture_sets):
             if texture_set not in all_texture_sets:
@@ -822,23 +921,24 @@ class TextureExporterDialog(QtWidgets.QDialog):
                 self.shader_name,
                 scope_expression,
                 is_convert,
-                is_force_8bits
+                is_force_8bits,
+                is_color_correct
             )
             exporter.output_textures()
+        self.store_metadata()
 
     def explore_directory(self):
         directory = self.workflow.get_previous_directory().replace("/", "\\")
         subprocess.Popen(r'explorer /select, "{0}"'.format(directory))
 
     def export_mesh_map(self):
-        radio = len(self.texture_sets) / 100;
         for index, texture_set in enumerate(self.texture_sets):
             check_box = self.texture_set_check_boxes[index]
             if not check_box.isChecked():
                 log("Skip : {0}".format(texture_set))
                 continue
             exporter = Exporter(texture_set)
-            exporter.output_meshmap()
+            exporter.output_meshmap(self.combined_meshmap_cb.isChecked())
 
     def preview_export(self):
         all_texture_sets = [ts.name() for ts in spts.all_texture_sets()]
@@ -848,11 +948,10 @@ class TextureExporterDialog(QtWidgets.QDialog):
         for index, texture_set in enumerate(all_texture_sets):
             exporter = Exporter(texture_set, self.shader_name, scope_expression)
             exporter.preview_output_textures()
-        ExportChannelRangeKeeper.set("store", scope_expression)
 
     def no_projectUI(self):
         """
-            If project is not opened.
+        If project is not opened.
         """
         main_layout = QtWidgets.QVBoxLayout()
         info = QtWidgets.QLabel("No Project has been opened.")
@@ -862,14 +961,17 @@ class TextureExporterDialog(QtWidgets.QDialog):
 
     def invalid_UI(self):
         """
-            If project name is incorrect.
+        If project name is incorrect.
         """
         main_layout = QtWidgets.QVBoxLayout()
-        main_layout.addWidget(
-            QtWidgets.QLabel(
-                "Project Name is incorrect : %s" % self.workflow.name()
+        info_label = QtWidgets.QLabel(
+            "Project Name incorrect : %s\n%s" % (
+                self.workflow.name(),
+                ProjectNameMatcher
             )
         )
+        info_label.setStyleSheet(_GlobalLabelStyle)
+        main_layout.addWidget(info_label)
         self.setLayout(main_layout)
 
     def refresh_selections(self, parent_layout):
@@ -878,7 +980,8 @@ class TextureExporterDialog(QtWidgets.QDialog):
         self.texture_sets.clear()
         self.texture_set_check_boxes.clear()
         for ts in [TextureSetWrapper(ts) for ts in spts.all_texture_sets()]:
-            check_box = QtWidgets.QCheckBox(ts.name())
+            name = ts.name()
+            check_box = QtWidgets.QCheckBox(name)
             check_box.setToolTip(ts.get_texture_name())
             self.texture_sets.append(ts.name())
             check_box.setChecked(False)
@@ -998,6 +1101,8 @@ class TextureExporterDialog(QtWidgets.QDialog):
         self.preview_export_btn.clicked.connect(self.preview_export)
         # -----------------------------------------------------------
         self.setLayout(main_layout)
+        # -----------------------------------------------------------
+        self.reset_metadata()
 
 def start_plugin():
     spev.DISPATCHER.connect(spev.ProjectOpened, refresh_ui)
