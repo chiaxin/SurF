@@ -1,3 +1,5 @@
 deploy.PL
 *.swp
 *.swo
+.mypy_cache
+venv

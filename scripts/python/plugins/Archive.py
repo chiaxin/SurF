@@ -13,15 +13,15 @@
 
 from PySide2 import QtWidgets, QtGui
 from os.path import realpath, dirname, isfile, isdir, join, splitext
-import CxLd.ui
-import CxLd.meta
+import SurF.ui
+import SurF.meta
 import json
-import substance_painter.ui         as spui
-import substance_painter.event      as spev
-import substance_painter.project    as sppj
+import substance_painter.ui  as spui
+import substance_painter.event  as spev
+import substance_painter.project  as sppj
 import substance_painter.textureset as spts
-import substance_painter.export     as spex
-import substance_painter.logging    as splg
+import substance_painter.export  as spex
+import substance_painter.logging as splg
 
 # -----------------------------------------
 __Version__= "0.1.01 (beta)"
