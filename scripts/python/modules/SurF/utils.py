@@ -8,6 +8,8 @@
 #
 
 import substance_painter.logging as splg
+import tempfile
+import json
 
 
 def reverse_replace(s, old, new, occurrence):
